@@ -1,6 +1,12 @@
 # Install the Windows Git launcher fix on paperclipai 2026.1106.0
 
-This overlay applies only to the official npm packages at version `2026.1106.0`.
+Deployment is blocked. Do not copy these files onto the installed package.
+
+The installed `dist/github-launcher.js` matches the published `2026.1106.0` file (`05b8853bdca289d86f3dda1c82a909a5817654885dbf1472de0beee22abefbcf`, 7958 bytes). The installed `dist/execution-target.js` does not. Its SHA-256 is `b31d890dbc0217da23f1d84b23f09143a90cc6c520caac70559134a6c9ac1557`, its size is 199348 bytes, and its mtime is 2026-11-18 00:36 Asia/Shanghai. The published file is `cfabc0c2d3bfb4441f9b2fc5995ad4e243618cf5f92f082e9fb042362fcb8e5d`, 198994 bytes, LF only. The hash gate below stays that published hash. Do not replace it with the observed hash, and do not overwrite the installed file. Preserve that file and its backup until the extra 354 bytes are identified.
+
+The running service reports commit `d69631b01b9c658f80bf8bed389863dce82643e1` from `@paperclipai/server/dist/build-info.json`. That stamp is written at publish time. It does not hash `execution-target.js`, so a local edit of that file does not change the health report.
+
+This overlay applies only to an unmodified official `execution-target.js`. The copy on disk is not that file.
 Do not install the current `master` branch, and do not install this git branch, in place of that version. Those trees have moved on. Their builds are not a drop-in replacement.
 
 The running server loads `@paperclipai/adapter-utils`. The server package does not inline this launcher. Replacing the three files below is the whole runtime change. No database, secret, task, or agent state is involved.
@@ -31,10 +37,10 @@ From this overlay directory, the replacement files are in `files/`:
 
 ## Check the current files
 
-Run this with the Node binary that starts Paperclip. Replace the two paths.
+Hash with any local Node. The server process itself is `C:\Users\qx\node.exe` v24.21.0 x64. `E:\node.exe` is the same version and is not the server process. Do not use it as `process.execPath` for a launcher staged by that server.
 
 ```bat
-E:\node.exe -e "const fs=require('fs');const c=require('crypto');for (const f of process.argv.slice(1)) console.log(c.createHash('sha256').update(fs.readFileSync(f)).digest('hex'), f)" dist\github-launcher.js dist\execution-target.js
+C:\Users\qx\node.exe -e "const fs=require('fs');const c=require('crypto');for (const f of process.argv.slice(1)) console.log(c.createHash('sha256').update(fs.readFileSync(f)).digest('hex'), fs.statSync(f).size, f)" dist\github-launcher.js dist\execution-target.js
 ```
 
 Required current hashes:
@@ -44,7 +50,7 @@ Required current hashes:
 cfabc0c2d3bfb4441f9b2fc5995ad4e243618cf5f92f082e9fb042362fcb8e5d  dist/execution-target.js
 ```
 
-Stop if either hash differs. Do not continue with a different build.
+Stop if either hash differs. Do not continue with a different build. The installed `execution-target.js` already fails this gate. Keep the backup. The apply steps are not authorized for that file.
 
 ## Apply
 
