@@ -93,10 +93,17 @@ export function escapeWindowsCmdArgument(arg: string, doubleEscapeMetaChars = fa
   return escaped;
 }
 
+function windowsTextRejected(value: string): boolean {
+  return /[\u0000\r\n]/.test(value);
+}
+
 export function startGitHubCommand(executable: string, args: readonly string[], env: NodeJS.ProcessEnv, platform: string, spawn: typeof Spawn, pathApi: Pick<LauncherPath, "extname" | "join">) {
   const ext = pathApi.extname(executable).toLowerCase();
   if (platform === "win32" && (ext === ".cmd" || ext === ".bat")) {
-    const root = env.SystemRoot || env.WINDIR || "C:\\Windows";
+    const root = env.SystemRoot || env.WINDIR;
+    if (typeof root !== "string" || !/^[A-Za-z]:[\\/][^"\u0000\r\n]*$/.test(root) || root.includes("..") || windowsTextRejected(executable) || args.some(windowsTextRejected)) {
+      throw new Error("Paperclip: GitHub command line rejected.");
+    }
     const cmd = pathApi.join(root, "System32", "cmd.exe");
     const doubleEscape = /node_modules[\\/]\.bin[\\/][^\\/]+\.(?:cmd|bat)$/i.test(executable);
     const shellCommand = [escapeWindowsCmdCommand(executable), ...args.map((arg) => escapeWindowsCmdArgument(arg, doubleEscape))].join(" ");

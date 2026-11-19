@@ -948,18 +948,9 @@ export async function cleanupGitHubOperationLaunchers(input) {
         await fs.rm(directory, { recursive: true, force: true });
     }
 }
-function environmentPathValue(env) {
-    if (typeof env.PATH === "string" && env.PATH.length > 0)
-        return env.PATH;
-    for (const [key, value] of Object.entries(env)) {
-        if (key.toLowerCase() === "path" && typeof value === "string" && value.length > 0)
-            return value;
-    }
-    return undefined;
-}
 async function githubOperationLauncherBasePath(target, env) {
     if (!target)
-        return environmentPathValue(env) || process.env.PATH || (process.platform === "win32" ? "" : "/usr/bin:/bin");
+        return env.PATH || (process.platform === "win32" ? Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] : undefined) || process.env.PATH || "/usr/bin:/bin";
     const configuredPath = sanitizeRemoteExecutionEnv(env).PATH;
     if (configuredPath !== undefined)
         return configuredPath;
@@ -1102,65 +1093,55 @@ printf '\0PAPERCLIP_GIT_CONTEXT_END\0'
     };
 }
 /** Stage token-free launchers next to the execution, not in shared global Git config. */
-export function planGitHubOperationLauncherFiles(input) {
-    const delimiter = input.remote ? ":" : input.pathDelimiter;
-    const processPath = input.basePath ? `${input.directory}${delimiter}${input.basePath}` : input.directory;
-    const clearEmptyGitIdentity = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]
-        .map((key) => `if [ -z "\${${key}-}" ]; then unset ${key}; fi\n`)
-        .join("");
-    const exportPath = input.remote || input.platform !== "win32";
-    const profile = `${exportPath ? `export PATH=${shellQuote(processPath)}\n` : ""}${clearEmptyGitIdentity}`;
-    const localWindows = !input.remote && input.platform === "win32";
-    let programs;
-    if (localWindows) {
-        if (!input.shim || input.shim.length < 64 || input.shim[0] !== 0x4d || input.shim[1] !== 0x5a)
-            throw new Error("Paperclip Windows Git launcher supports x64 Node only");
-        if (!input.nodePath || !path.win32.isAbsolute(input.nodePath) || /["\r\n\0]/.test(input.nodePath))
-            throw new Error("Paperclip Windows Git launcher requires an absolute Node executable path");
-        programs = [
-            { name: "git.cjs", body: input.launcherSource, executable: false, private: false },
-            { name: "gh.cjs", body: input.launcherSource, executable: false, private: false },
-            { name: "git.exe", body: input.shim, executable: true, private: false },
-            { name: "gh.exe", body: input.shim, executable: true, private: false },
-            { name: "node.path", body: input.nodePath + "\n", executable: false, private: true },
-        ];
-    }
-    else {
-        programs = ["git", "gh"].map((name) => ({ name, body: input.launcherSource, executable: true, private: false }));
-    }
-    return {
-        processPath, profile, files: [
-            { name: "package.json", body: '{"type":"commonjs"}\n', executable: false, private: false },
-            ...programs,
-            ...[".zshenv", ".zprofile", ".zshrc", ".bash_profile", ".bashrc", ".profile"].map((name) => ({ name, body: profile, executable: false, private: false })),
-        ],
-    };
-}
 export async function prepareGitHubOperationLaunchers(input) {
     const remote = input.target?.kind === "remote" ? input.target : null;
     const directory = githubOperationLauncherDirectory(input);
     const configDirectory = path.posix.join(directory, "gh-config");
     const basePath = await githubOperationLauncherBasePath(remote, input.env);
+    const managedPath = basePath ? `${directory}${remote ? ":" : path.delimiter}${basePath}` : directory;
+    // Login shells may reorder PATH through /etc/profile or path_helper. Restore
+    // the managed launchers after startup without loading a host user's profile.
+    // Empty merge overrides clear host identity before launch, but Git treats
+    // them as an explicit empty author. Remove them once the shell has inherited
+    // its final environment; preserve nonempty per-operation identity values.
+    const clearEmptyGitIdentity = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]
+        .map((key) => `if [ -z "\${${key}-}" ]; then unset ${key}; fi\n`)
+        .join("");
     const localWindows = !remote && process.platform === "win32";
+    // Keep the process PATH built above. Do not export that semicolon-joined
+    // value from the POSIX profiles on a local Windows host.
+    const profile = `${localWindows ? "" : `export PATH=${shellQuote(managedPath)}\n`}${clearEmptyGitIdentity}`;
+    const launcherSource = githubLauncherSource();
     const shim = localWindows ? windowsGitHubLauncherShim() : null;
     if (localWindows && !shim)
         throw new Error(`Paperclip Windows Git launcher supports x64 Node only (this process is ${process.arch}).`);
-    const plan = planGitHubOperationLauncherFiles({
-        directory, basePath, remote: remote !== null, platform: process.platform, pathDelimiter: path.delimiter,
-        launcherSource: githubLauncherSource(), nodePath: process.execPath, shim,
-    });
+    if (localWindows && (!path.win32.isAbsolute(process.execPath) || /["\r\n\0]/.test(process.execPath)))
+        throw new Error("Paperclip Windows Git launcher requires an absolute Node executable path");
+    const files = Object.fromEntries([
+        ["package.json", '{"type":"commonjs"}\n'],
+        ...(localWindows
+            ? [
+                ["git.cjs", launcherSource],
+                ["gh.cjs", launcherSource],
+                ["git.exe", shim],
+                ["gh.exe", shim],
+                ["node.path", process.execPath + "\n"],
+            ]
+            : ["git", "gh"].map((name) => [name, launcherSource])),
+        ...[".zshenv", ".zprofile", ".zshrc", ".bash_profile", ".bashrc", ".profile"].map((name) => [name, profile]),
+    ]);
     if (remote) {
         const runner = adapterExecutionTargetCommandRunner(remote);
         await syncRemoteTextFilesWithHashSkip({
             runner, remoteCwd: remote.remoteCwd,
-            files: plan.files.map((file) => {
-                if (typeof file.body !== "string")
+            files: Object.entries(files).map(([program, body]) => {
+                if (typeof body !== "string")
                     throw new Error("Remote GitHub launchers must be text");
                 return {
-                    remoteDir: directory, remotePath: path.posix.join(directory, file.name), body: file.body,
+                    remoteDir: directory, remotePath: path.posix.join(directory, program), body,
                     label: "GitHub operation launcher", action: "stage GitHub operation launcher",
-                    lockDir: path.posix.join(directory, `.${file.name}.lock`),
-                    executable: file.executable,
+                    lockDir: path.posix.join(directory, `.${program}.lock`),
+                    executable: program === "git" || program === "gh",
                 };
             }),
             ensureDirectories: [configDirectory], action: "stage GitHub operation launchers",
@@ -1170,10 +1151,13 @@ export async function prepareGitHubOperationLaunchers(input) {
     else {
         await fs.mkdir(directory, { recursive: true, mode: 0o700 });
         await fs.mkdir(configDirectory, { recursive: true, mode: 0o700 });
-        for (const file of plan.files)
-            await fs.writeFile(path.join(directory, file.name), file.body, { mode: file.private ? 0o600 : 0o700 });
+        for (const [program, body] of Object.entries(files))
+            await fs.writeFile(path.join(directory, program), body, { mode: program === "node.path" ? 0o600 : 0o700 });
     }
-    return { ...input.env, PATH: plan.processPath, ZDOTDIR: directory, BASH_ENV: `${directory}/.bashrc`,
+    const launchEnvironment = !remote && process.platform === "win32"
+        ? Object.fromEntries(Object.entries(input.env).filter(([key]) => key.toUpperCase() !== "PATH"))
+        : input.env;
+    return { ...launchEnvironment, PATH: managedPath, ZDOTDIR: directory, BASH_ENV: `${directory}/.bashrc`,
         GH_CONFIG_DIR: configDirectory, PAPERCLIP_GITHUB_LAUNCHER_DIR: directory };
 }
 function buildBridgeResponseHeaders(response) {

@@ -54,16 +54,27 @@ static void strip_trailing_newline(char *text, DWORD *length) {
     }
 }
 
-static BOOL invalid_node_path(const WCHAR *path) {
+static BOOL contains_dotdot(const WCHAR *path) {
+    const WCHAR *cursor = path;
+    while (*cursor != L'\0') {
+        if (cursor[0] == L'.' && cursor[1] == L'.' &&
+            (cursor == path || cursor[-1] == L'\\' || cursor[-1] == L'/') &&
+            (cursor[2] == L'\0' || cursor[2] == L'\\' || cursor[2] == L'/')) return TRUE;
+        cursor++;
+    }
+    return FALSE;
+}
+
+static BOOL invalid_launcher_path(const WCHAR *path, BOOL allow_unc) {
     int index;
-    if (path[0] == L'\0') return TRUE;
+    if (path[0] == L'\0' || contains_dotdot(path)) return TRUE;
     for (index = 0; path[index] != L'\0'; index++) {
         WCHAR ch = path[index];
         if (ch == L'"' || ch == L'\r' || ch == L'\n' || ch < 0x20) return TRUE;
     }
     if (((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')) &&
         path[1] == L':' && (path[2] == L'\\' || path[2] == L'/')) return FALSE;
-    if (path[0] == L'\\' && path[1] == L'\\') return FALSE;
+    if (allow_unc && path[0] == L'\\' && path[1] == L'\\') return FALSE;
     return TRUE;
 }
 
@@ -95,7 +106,7 @@ int main(void) {
 
     SetConsoleCtrlHandler(NULL, TRUE);
     module_length = GetModuleFileNameW(NULL, module_path, 32767);
-    if (module_length == 0 || module_length >= 32767 || !ends_with_exe(module_path)) {
+    if (module_length == 0 || module_length >= 32767 || !ends_with_exe(module_path) || invalid_launcher_path(module_path, FALSE)) {
         die("Paperclip: Windows Git launcher could not resolve its own path.\n");
     }
     file_name = module_path + module_length;
@@ -107,9 +118,15 @@ int main(void) {
     if (lstrlenW(script_path) + lstrlenW(file_name) >= 32767) die("Paperclip: Windows Git launcher path is too long.\n");
     lstrcatW(script_path, file_name);
     if (!ends_with_exe(script_path)) die("Paperclip: Windows Git launcher could not resolve its own path.\n");
+    if (lstrcmpiW(file_name, L"git.exe") != 0 && lstrcmpiW(file_name, L"gh.exe") != 0) {
+        die("Paperclip: Windows Git launcher name is not git.exe or gh.exe.\n");
+    }
     script_path[lstrlenW(script_path) - 3] = L'c';
     script_path[lstrlenW(script_path) - 2] = L'j';
     script_path[lstrlenW(script_path) - 1] = L's';
+    if (invalid_launcher_path(script_path, FALSE) || GetFileAttributesW(script_path) == INVALID_FILE_ATTRIBUTES) {
+        die("Paperclip: Windows Git launcher script is missing.\n");
+    }
 
     if (!lstrcpynW(node_file_path, module_path, directory_length + 1)) die("Paperclip: Windows Git launcher path is too long.\n");
     if (lstrlenW(node_file_path) + 10 >= 32767) die("Paperclip: Windows Git launcher path is too long.\n");
@@ -124,7 +141,7 @@ int main(void) {
     if (node_bytes == 0 || node_bytes >= sizeof node_utf8 - 1) die("Paperclip: Windows Git launcher node.path is invalid.\n");
     node_utf8[node_bytes] = '\0';
     strip_trailing_newline(node_utf8, &node_bytes);
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, node_utf8, -1, node_path, 32767) <= 0 || invalid_node_path(node_path)) {
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, node_utf8, -1, node_path, 32767) <= 0 || invalid_launcher_path(node_path, TRUE)) {
         die("Paperclip: Windows Git launcher node.path is invalid.\n");
     }
 

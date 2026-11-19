@@ -97,7 +97,7 @@ describe("Windows GitHub command resolution", () => {
   it("publishes an x64 console image and no shim for other architectures", () => {
     const shim = windowsGitHubLauncherShim("x64");
     expect(shim).not.toBeNull();
-    expect(createHash("sha256").update(shim!).digest("hex")).toBe("44254825ba2874f6c01064f97c50e62852cffb344d52f7150dafb7268b3f6f6b");
+    expect(createHash("sha256").update(shim!).digest("hex")).toBe("1cf1462d86f7d646263bf0201622053ddf402ca3cbe2f3159f1ec205554ba0fc");
     expect(shim!.subarray(0, 2).toString("latin1")).toBe("MZ");
     const pe = shim!.readUInt32LE(0x3c);
     expect(shim!.subarray(pe, pe + 4).toString("latin1")).toBe("PE\0\0");
@@ -126,6 +126,9 @@ describe("Windows GitHub command resolution", () => {
     expect(calls[1]?.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
     expect(calls[1]?.args[3]).toContain("a^&b");
     expect(calls[1]?.args[3]?.startsWith("\"")).toBe(true);
+    expect(calls[1]?.args[3]).toContain("a^&b");
+    expect(() => startGitHubCommand(String.raw`C:\git.cmd`, ["a\nb"], { SystemRoot: String.raw`C:\Windows` }, "win32", spawn, path.win32)).toThrow(/command line rejected/);
+    expect(() => startGitHubCommand(String.raw`C:\git.cmd`, ["ok"], { SystemRoot: "..\\Windows" }, "win32", spawn, path.win32)).toThrow(/command line rejected/);
   });
 
   it("resolves PATHEXT executables, skips the launcher directory, and forwards arguments", async () => {
