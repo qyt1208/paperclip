@@ -1,7 +1,132 @@
 import { isAbsolute } from "node:path";
+import type { spawn as Spawn } from "node:child_process";
+
+type LauncherFs = {
+  realpathSync(target: string): string;
+  statSync(target: string): { isFile(): boolean };
+  accessSync(target: string, mode: number): void;
+  constants: { X_OK: number };
+};
+type LauncherPath = {
+  delimiter: string;
+  join(...parts: string[]): string;
+  dirname(target: string): string;
+  resolve(target: string): string;
+  extname(target: string): string;
+};
+
+/** Case-fold only on Windows. POSIX paths remain exact. */
+export function githubLauncherDirectoriesMatch(left: string, right: string, platform: string, pathApi: Pick<LauncherPath, "resolve">): boolean {
+  const resolvedLeft = pathApi.resolve(left);
+  const resolvedRight = pathApi.resolve(right);
+  return platform === "win32" ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase() : resolvedLeft === resolvedRight;
+}
+
+/** git.cmd, git.cjs, and git.exe are the git launcher. POSIX keeps the basename. */
+export function githubLauncherCommandName(fileName: string, platform: string): string {
+  if (platform !== "win32") return fileName;
+  const lower = fileName.toLowerCase();
+  for (const ext of [".cjs", ".js", ".cmd", ".bat", ".exe", ".com"]) {
+    if (lower.endsWith(ext)) return lower.slice(0, -ext.length);
+  }
+  return lower;
+}
+
+/** Drop the launcher directory so the real git/gh cannot recurse into this shim. */
+export function githubLauncherSearchPath(pathValue: string, directory: string, platform: string, fsApi: Pick<LauncherFs, "realpathSync">, pathApi: Pick<LauncherPath, "delimiter" | "resolve">): string[] {
+  return String(pathValue || "").split(pathApi.delimiter).filter((entry) => {
+    if (!entry) return false;
+    try { return !githubLauncherDirectoriesMatch(fsApi.realpathSync(entry), directory, platform, pathApi); }
+    catch { return true; }
+  });
+}
+
+export function windowsPathExtensions(pathExt: string | undefined): string[] {
+  const raw = pathExt && pathExt.trim() ? pathExt : ".COM;.EXE;.BAT;.CMD";
+  const extensions: string[] = [];
+  for (const part of raw.split(";")) {
+    const trimmed = part.trim();
+    // An empty or "." extension would select an extensionless file. Windows then
+    // opens that file as a document. Never probe it.
+    if (!trimmed || trimmed === ".") continue;
+    extensions.push(trimmed.startsWith(".") ? trimmed : `.${trimmed}`);
+  }
+  return extensions;
+}
+
+/** PATHEXT order on Windows, extensionless plus execute-bit on POSIX. */
+export function resolveGitHubLauncherExecutable(program: string, pathValue: string, directory: string, env: { PATHEXT?: string }, platform: string, fsApi: LauncherFs, pathApi: Pick<LauncherPath, "delimiter" | "join" | "dirname" | "resolve">): string | null {
+  const extensions = platform === "win32" ? windowsPathExtensions(env.PATHEXT) : [""];
+  for (const entry of githubLauncherSearchPath(pathValue, directory, platform, fsApi, pathApi)) {
+    for (const ext of extensions) {
+      const candidate = pathApi.join(entry, `${program}${ext}`);
+      try {
+        if (platform === "win32") {
+          if (!fsApi.statSync(candidate).isFile()) continue;
+        } else {
+          fsApi.accessSync(candidate, fsApi.constants.X_OK);
+          if (!fsApi.statSync(candidate).isFile()) continue;
+        }
+        const real = fsApi.realpathSync(candidate);
+        if (githubLauncherDirectoriesMatch(pathApi.dirname(real), directory, platform, pathApi)) continue;
+        return real;
+      } catch { continue; }
+    }
+  }
+  return null;
+}
+
+/** Escape one token for cmd.exe /d /s /c. Same rules as cross-spawn. */
+export function escapeWindowsCmdCommand(arg: string): string {
+  return arg.replace(/([()\][%!^"`<>&|;, *?])/g, "^$1");
+}
+
+/** Quote one argv element for cmd.exe, then caret-escape metacharacters. */
+export function escapeWindowsCmdArgument(arg: string, doubleEscapeMetaChars = false): string {
+  let escaped = String(arg);
+  escaped = escaped.replace(/(?=(\\+?)?)\1"/g, "$1$1\\\"");
+  escaped = escaped.replace(/(?=(\\+?)?)\1$/, "$1$1");
+  escaped = `"${escaped}"`;
+  const meta = /([()\][%!^"`<>&|;, *?])/g;
+  escaped = escaped.replace(meta, "^$1");
+  if (doubleEscapeMetaChars) escaped = escaped.replace(meta, "^$1");
+  return escaped;
+}
+
+export function startGitHubCommand(executable: string, args: readonly string[], env: NodeJS.ProcessEnv, platform: string, spawn: typeof Spawn, pathApi: Pick<LauncherPath, "extname" | "join">) {
+  const ext = pathApi.extname(executable).toLowerCase();
+  if (platform === "win32" && (ext === ".cmd" || ext === ".bat")) {
+    const root = env.SystemRoot || env.WINDIR || "C:\\Windows";
+    const cmd = pathApi.join(root, "System32", "cmd.exe");
+    const doubleEscape = /node_modules[\\/]\.bin[\\/][^\\/]+\.(?:cmd|bat)$/i.test(executable);
+    const shellCommand = [escapeWindowsCmdCommand(executable), ...args.map((arg) => escapeWindowsCmdArgument(arg, doubleEscape))].join(" ");
+    return spawn(cmd, ["/d", "/s", "/c", "\"" + shellCommand + "\""], {
+      env, stdio: "inherit", windowsVerbatimArguments: true, windowsHide: true,
+    });
+  }
+  return spawn(executable, args, { env, stdio: "inherit", windowsHide: true });
+}
+
+function githubLauncherHelperSource(): string {
+  return [
+    githubLauncherDirectoriesMatch,
+    githubLauncherCommandName,
+    githubLauncherSearchPath,
+    windowsPathExtensions,
+    resolveGitHubLauncherExecutable,
+    escapeWindowsCmdCommand,
+    escapeWindowsCmdArgument,
+    startGitHubCommand,
+  ].map((fn) => fn.toString()).join("\n");
+}
 
 /** Standalone source for local, SSH, and sandbox runtimes. No secrets in files. */
-export function githubLauncherSource(options: { brokerFile?: boolean; interpreterPath?: string } = {}): string {
+export function githubLauncherSource(options: {
+  brokerFile?: boolean;
+  interpreterPath?: string;
+  /** Tests pin this. Staging omits it and the script uses process.platform. */
+  platform?: "win32" | "linux" | "darwin";
+} = {}): string {
   if (options.interpreterPath !== undefined && (typeof options.interpreterPath !== "string"
     || !isAbsolute(options.interpreterPath) || /[\s\0]/u.test(options.interpreterPath))) {
     throw new Error("GitHub launcher interpreter must be an absolute path without whitespace");
@@ -15,20 +140,19 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
+${githubLauncherHelperSource()}
 // A PATH shim can capture this launcher's absolute path and call it again.
 // Reject that cycle before resolving another executable or capturing authority.
 if (process.env.PAPERCLIP_GITHUB_OPERATION_ACTIVE) {
   process.stderr.write('Paperclip: GitHub launcher_recursion_rejected.\n');
   process.exit(126);
 }
-const directory = path.dirname(fs.realpathSync(process.argv[1]));
-const program = path.basename(process.argv[1]);
-const originalPath = (process.env.PATH || '').split(path.delimiter).filter(p => {
-  try { return fs.realpathSync(p) !== directory; } catch { return true; }
-});
-const executable = originalPath.map(p => path.join(p, program)).find(p => {
-  try { fs.accessSync(p, fs.constants.X_OK); return fs.statSync(p).isFile(); } catch { return false; }
-});
+const scriptPath = fs.realpathSync(process.argv[1]);
+const directory = path.dirname(scriptPath);
+const launcherPlatform = ${options.platform ? JSON.stringify(options.platform) : "process.platform"};
+const program = githubLauncherCommandName(path.basename(scriptPath), launcherPlatform);
+const originalPath = githubLauncherSearchPath(process.env.PATH || '', directory, launcherPlatform, fs, path);
+const executable = resolveGitHubLauncherExecutable(program, process.env.PATH || '', directory, process.env, launcherPlatform, fs, path);
 if (!['git', 'gh'].includes(program) || !executable) {
   process.stderr.write('Paperclip: requested GitHub command is not installed.\n');
   process.exit(127);
@@ -189,12 +313,13 @@ ${options.brokerFile ? String.raw`
   env.PAPERCLIP_GITHUB_OPERATION_ACTIVE = '1';
   // Its Git children use the real binary, so steering cannot split a gh operation.
   env.PATH = originalPath.join(path.delimiter);
+  if (launcherPlatform === 'win32') env.Path = env.PATH;
   // Nested shell aliases must not reload the parent launcher profile and
   // recapture a newer identity. All ordinary descendants stay in this operation.
   env.ZDOTDIR = configDirectory;
   env.BASH_ENV = '/dev/null';
   env.GIT_SSH_COMMAND = 'ssh -F /dev/null -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=none -o BatchMode=yes';
-  const child = spawn(executable, process.argv.slice(2), { env, stdio: 'inherit' });
+  const child = startGitHubCommand(executable, process.argv.slice(2), env, launcherPlatform, spawn, path);
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => child.kill(signal));
   child.once('error', () => { process.stderr.write('Paperclip: GitHub command could not start.\n'); process.exitCode = 1; });
   child.once('exit', (code, signal) => { process.exitCode = code === null ? 128 : code; });

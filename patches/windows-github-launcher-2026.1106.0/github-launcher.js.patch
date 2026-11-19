@@ -1,0 +1,123 @@
+--- a/dist/github-launcher.js
++++ b/dist/github-launcher.js
+@@ -1,119 +1,6 @@
+ /** Standalone source is staged unchanged on local, SSH, and sandbox runtimes. No secrets in files. */
+ export function githubLauncherSource() {
+-    return String.raw `#!/usr/bin/env node
+-const fs = require('node:fs');
+-const path = require('node:path');
+-const os = require('node:os');
+-const { spawn } = require('node:child_process');
+-const directory = path.dirname(fs.realpathSync(process.argv[1]));
+-const program = path.basename(process.argv[1]);
+-const originalPath = (process.env.PATH || '').split(path.delimiter).filter(p => {
+-  try { return fs.realpathSync(p) !== directory; } catch { return true; }
+-});
+-const executable = originalPath.map(p => path.join(p, program)).find(p => {
+-  try { fs.accessSync(p, fs.constants.X_OK); return fs.statSync(p).isFile(); } catch { return false; }
+-});
+-if (!['git', 'gh'].includes(program) || !executable) {
+-  process.stderr.write('Paperclip: requested GitHub command is not installed.\n');
+-  process.exit(127);
+-}
+-async function main() {
+-  let env = { ...process.env };
+-  const diagnostic = (code) => process.stderr.write('Paperclip: GitHub ' + code + '; continuing without managed credentials.\n');
+-  const configRoot = env.GH_CONFIG_DIR || os.tmpdir();
+-  // A missing/unwritable scratch directory must not break local Git. The
+-  // fallback deliberately cannot load the host's gh authentication files.
+-  let configDirectory = path.join(directory, 'unavailable-gh-config');
+-  let configReady = false;
+-  try {
+-    fs.mkdirSync(configRoot, { recursive: true, mode: 0o700 });
+-    configDirectory = fs.mkdtempSync(path.join(configRoot, 'paperclip-github-operation-'));
+-    fs.chmodSync(configDirectory, 0o700);
+-    configReady = true;
+-    process.once('exit', () => { try { fs.rmSync(configDirectory, { recursive: true, force: true }); } catch {} });
+-  } catch { diagnostic('configuration_directory_unavailable'); }
+-  {
+-    for (const key of Object.keys(env)) {
+-      if (/^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|PAPERCLIP_GIT_TOKEN|GIT_AUTHOR_.*|GIT_COMMITTER_.*|GIT_CONFIG_.*|GIT_ASKPASS|SSH_ASKPASS|SSH_AUTH_SOCK|GIT_SSH.*)$/.test(key)) delete env[key];
+-    }
+-    Object.assign(env, {
+-      GH_CONFIG_DIR: configDirectory, SSH_AUTH_SOCK: '',
+-      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null',
+-      GIT_TERMINAL_PROMPT: '0',
+-      // The inherited identity was deleted above. Empty identity env values
+-      // override even explicit repository/command config and break local commits.
+-      // Require configured identity instead of guessing the OS user's details.
+-      GIT_CONFIG_COUNT: '5', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '',
+-      GIT_CONFIG_KEY_1: 'url.https://github.com/.insteadOf', GIT_CONFIG_VALUE_1: 'git@github.com:',
+-      GIT_CONFIG_KEY_2: 'url.https://github.com/.insteadOf', GIT_CONFIG_VALUE_2: 'ssh://git@github.com/',
+-      GIT_CONFIG_KEY_3: 'core.askPass', GIT_CONFIG_VALUE_3: '',
+-      GIT_CONFIG_KEY_4: 'user.useConfigOnly', GIT_CONFIG_VALUE_4: 'true',
+-    });
+-    const base = env.PAPERCLIP_GITHUB_BROKER_URL || env.PAPERCLIP_API_URL;
+-    try {
+-    let response;
+-    if (base && env.PAPERCLIP_GITHUB_BROKER_TOKEN) {
+-      const url = base.replace(/\/+$/, '').replace(/\/api$/, '') + '/runtime-tools/github/credentials';
+-      // A slow or restarting control plane must not cost the operation its
+-      // managed identity, so a failed request is retried before giving up.
+-      // Busy (409) responses and transport failures keep separate budgets, and
+-      // the body is read inside the retry so a failed read is retried too.
+-      let transportFailures = 0, conflicts = 0, result;
+-      for (;;) {
+-        try {
+-          response = await fetch(url, {
+-            method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
+-            headers: { authorization: 'Bearer ' + (env.PAPERCLIP_GITHUB_BRIDGE_TOKEN || env.PAPERCLIP_API_KEY || env.PAPERCLIP_GITHUB_BROKER_TOKEN),
+-              'x-paperclip-github-capability': env.PAPERCLIP_GITHUB_BROKER_TOKEN, 'content-type': 'application/json' },
+-            body: '{}',
+-          });
+-          if (response.status === 409 && conflicts < 29) {
+-            conflicts += 1;
+-            await response.arrayBuffer();
+-            await new Promise(resolve => setTimeout(resolve, 1000));
+-            continue;
+-          }
+-          result = response.ok ? await response.json() : null;
+-          break;
+-        } catch (error) {
+-          transportFailures += 1;
+-          if (transportFailures >= 3) throw error;
+-          await new Promise(resolve => setTimeout(resolve, 500 * transportFailures));
+-        }
+-      }
+-      if (!response.ok) {
+-        diagnostic(response.status === 401 || response.status === 403 ? 'capability_rejected' : 'broker_response_unavailable');
+-      } else {
+-      if (result.status === 'unavailable') {
+-        const reason = typeof result.reason === 'string'
+-          ? result.reason.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 500)
+-          : 'Check the GitHub connection in Paperclip';
+-        process.stderr.write('Paperclip: GitHub access unavailable: ' + reason + '. Continuing without GitHub credentials.\n');
+-      }
+-      if (result.status === 'available' && configReady) {
+-        for (const [key, value] of Object.entries(result.env || {})) {
+-          if (/^(GH_TOKEN|GITHUB_TOKEN|PAPERCLIP_GIT_TOKEN|GIT_TERMINAL_PROMPT|GIT_AUTHOR_(NAME|EMAIL)|GIT_COMMITTER_(NAME|EMAIL)|GIT_CONFIG_COUNT|GIT_CONFIG_(KEY|VALUE)_\d+)$/.test(key) && typeof value === 'string') env[key] = value;
+-        }
+-      }
+-      }
+-    } else { diagnostic('capability_missing'); }
+-    } catch { diagnostic('broker_transport_unavailable'); }
+-  }
+-  // Only this invocation and its children inherit the captured credential.
+-  // Its Git children use the real binary, so steering cannot split a gh operation.
+-  env.PATH = originalPath.join(path.delimiter);
+-  // Nested shell aliases must not reload the parent launcher profile and
+-  // recapture a newer identity. All ordinary descendants stay in this operation.
+-  env.ZDOTDIR = configDirectory;
+-  env.BASH_ENV = '/dev/null';
+-  env.GIT_SSH_COMMAND = 'ssh -F /dev/null -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=none -o BatchMode=yes';
+-  const child = spawn(executable, process.argv.slice(2), { env, stdio: 'inherit' });
+-  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => child.kill(signal));
+-  child.once('error', () => { process.stderr.write('Paperclip: GitHub command could not start.\n'); process.exitCode = 1; });
+-  child.once('exit', (code, signal) => { process.exitCode = code === null ? 128 : code; });
+-}
+-main().catch(() => { process.stderr.write('Paperclip: GitHub launcher_setup_failed.\n'); process.exitCode = 1; });
+-`;
++    return "#!/usr/bin/env node\nconst fs = require('node:fs');\nconst path = require('node:path');\nconst os = require('node:os');\nconst { spawn } = require('node:child_process');\nfunction githubLauncherDirectoriesMatch(left,right,platform,pathApi){const resolvedLeft=pathApi.resolve(left);const resolvedRight=pathApi.resolve(right);return platform===\"win32\"?resolvedLeft.toLowerCase()===resolvedRight.toLowerCase():resolvedLeft===resolvedRight}\nfunction githubLauncherCommandName(fileName,platform){if(platform!==\"win32\")return fileName;const lower=fileName.toLowerCase();for(const ext of[\".cjs\",\".js\",\".cmd\",\".bat\",\".exe\",\".com\"]){if(lower.endsWith(ext))return lower.slice(0,-ext.length)}return lower}\nfunction githubLauncherSearchPath(pathValue,directory,platform,fsApi,pathApi){return String(pathValue||\"\").split(pathApi.delimiter).filter(entry=>{if(!entry)return false;try{return!githubLauncherDirectoriesMatch(fsApi.realpathSync(entry),directory,platform,pathApi)}catch{return true}})}\nfunction windowsPathExtensions(pathExt){const raw=pathExt&&pathExt.trim()?pathExt:\".COM;.EXE;.BAT;.CMD\";const extensions=[];for(const part of raw.split(\";\")){const trimmed=part.trim();if(!trimmed||trimmed===\".\")continue;extensions.push(trimmed.startsWith(\".\")?trimmed:`.${trimmed}`)}return extensions}\nfunction resolveGitHubLauncherExecutable(program,pathValue,directory,env,platform,fsApi,pathApi){const extensions=platform===\"win32\"?windowsPathExtensions(env.PATHEXT):[\"\"];for(const entry of githubLauncherSearchPath(pathValue,directory,platform,fsApi,pathApi)){for(const ext of extensions){const candidate=pathApi.join(entry,`${program}${ext}`);try{if(platform===\"win32\"){if(!fsApi.statSync(candidate).isFile())continue}else{fsApi.accessSync(candidate,fsApi.constants.X_OK);if(!fsApi.statSync(candidate).isFile())continue}const real=fsApi.realpathSync(candidate);if(githubLauncherDirectoriesMatch(pathApi.dirname(real),directory,platform,pathApi))continue;return real}catch{continue}}}return null}\nfunction escapeWindowsCmdCommand(arg){return arg.replace(/([()\\][%!^\"`<>&|;, *?])/g,\"^$1\")}\nfunction escapeWindowsCmdArgument(arg,doubleEscapeMetaChars=false){let escaped=String(arg);escaped=escaped.replace(/(?=(\\\\+?)?)\\1\"/g,'$1$1\\\\\"');escaped=escaped.replace(/(?=(\\\\+?)?)\\1$/,\"$1$1\");escaped=`\"${escaped}\"`;const meta=/([()\\][%!^\"`<>&|;, *?])/g;escaped=escaped.replace(meta,\"^$1\");if(doubleEscapeMetaChars)escaped=escaped.replace(meta,\"^$1\");return escaped}\nfunction startGitHubCommand(executable,args,env,platform,spawn,pathApi){const ext=pathApi.extname(executable).toLowerCase();if(platform===\"win32\"&&(ext===\".cmd\"||ext===\".bat\")){const root=env.SystemRoot||env.WINDIR||\"C:\\\\Windows\";const cmd=pathApi.join(root,\"System32\",\"cmd.exe\");const doubleEscape=/node_modules[\\\\/]\\.bin[\\\\/][^\\\\/]+\\.(?:cmd|bat)$/i.test(executable);const shellCommand=[escapeWindowsCmdCommand(executable),...args.map(arg=>escapeWindowsCmdArgument(arg,doubleEscape))].join(\" \");return spawn(cmd,[\"/d\",\"/s\",\"/c\",'\"'+shellCommand+'\"'],{env,stdio:\"inherit\",windowsVerbatimArguments:true,windowsHide:true})}return spawn(executable,args,{env,stdio:\"inherit\",windowsHide:true})}\nif (process.env.PAPERCLIP_GITHUB_OPERATION_ACTIVE) {\n  process.stderr.write('Paperclip: GitHub launcher_recursion_rejected.\\n');\n  process.exit(126);\n}\nconst scriptPath = fs.realpathSync(process.argv[1]);\nconst directory = path.dirname(scriptPath);\nconst launcherPlatform = process.platform;\nconst program = githubLauncherCommandName(path.basename(scriptPath), launcherPlatform);\nconst originalPath = githubLauncherSearchPath(process.env.PATH || '', directory, launcherPlatform, fs, path);\nconst executable = resolveGitHubLauncherExecutable(program, process.env.PATH || '', directory, process.env, launcherPlatform, fs, path);\nif (!['git', 'gh'].includes(program) || !executable) {\n  process.stderr.write('Paperclip: requested GitHub command is not installed.\\n');\n  process.exit(127);\n}\nasync function main() {\n  let env = { ...process.env };\n  const diagnostic = (code) => process.stderr.write('Paperclip: GitHub ' + code + '; continuing without managed credentials.\\n');\n  const configRoot = env.GH_CONFIG_DIR || os.tmpdir();\n  // A missing/unwritable scratch directory must not break local Git. The\n  // fallback deliberately cannot load the host's gh authentication files.\n  let configDirectory = path.join(directory, 'unavailable-gh-config');\n  let configReady = false;\n  try {\n    fs.mkdirSync(configRoot, { recursive: true, mode: 0o700 });\n    configDirectory = fs.mkdtempSync(path.join(configRoot, 'paperclip-github-operation-'));\n    fs.chmodSync(configDirectory, 0o700);\n    configReady = true;\n    process.once('exit', () => { try { fs.rmSync(configDirectory, { recursive: true, force: true }); } catch {} });\n  } catch { diagnostic('configuration_directory_unavailable'); }\n  {\n    for (const key of Object.keys(env)) {\n      if (/^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|PAPERCLIP_GIT_TOKEN|GIT_AUTHOR_.*|GIT_COMMITTER_.*|GIT_CONFIG_.*|GIT_ASKPASS|SSH_ASKPASS|SSH_AUTH_SOCK|GIT_SSH.*)$/.test(key)) delete env[key];\n    }\n    Object.assign(env, {\n      GH_CONFIG_DIR: configDirectory, SSH_AUTH_SOCK: '',\n      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null',\n      GIT_TERMINAL_PROMPT: '0',\n      // The inherited identity was deleted above. Empty identity env values\n      // override even explicit repository/command config and break local commits.\n      // Require configured identity instead of guessing the OS user's details.\n      GIT_CONFIG_COUNT: '5', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '',\n      GIT_CONFIG_KEY_1: 'url.https://github.com/.insteadOf', GIT_CONFIG_VALUE_1: 'git@github.com:',\n      GIT_CONFIG_KEY_2: 'url.https://github.com/.insteadOf', GIT_CONFIG_VALUE_2: 'ssh://git@github.com/',\n      GIT_CONFIG_KEY_3: 'core.askPass', GIT_CONFIG_VALUE_3: '',\n      GIT_CONFIG_KEY_4: 'user.useConfigOnly', GIT_CONFIG_VALUE_4: 'true',\n    });\n    const base = env.PAPERCLIP_GITHUB_BROKER_URL || env.PAPERCLIP_API_URL;\n    try {\n    let response;\n    if (base && env.PAPERCLIP_GITHUB_BROKER_TOKEN) {\n      const url = base.replace(/\\/+$/, '').replace(/\\/api$/, '') + '/runtime-tools/github/credentials';\n      // A slow or restarting control plane must not cost the operation its\n      // managed identity, so a failed request is retried before giving up.\n      // Busy (409) responses and transport failures keep separate budgets, and\n      // the body is read inside the retry so a failed read is retried too.\n      let transportFailures = 0, conflicts = 0, result;\n      for (;;) {\n        try {\n          response = await fetch(url, {\n            method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),\n            headers: { authorization: 'Bearer ' + (env.PAPERCLIP_GITHUB_BRIDGE_TOKEN || env.PAPERCLIP_API_KEY || env.PAPERCLIP_GITHUB_BROKER_TOKEN),\n              'x-paperclip-github-capability': env.PAPERCLIP_GITHUB_BROKER_TOKEN, 'content-type': 'application/json' },\n            body: '{}',\n          });\n          if (response.status === 409 && conflicts < 29) {\n            conflicts += 1;\n            await response.arrayBuffer();\n            await new Promise(resolve => setTimeout(resolve, 1000));\n            continue;\n          }\n          result = response.ok ? await response.json() : null;\n          break;\n        } catch (error) {\n          transportFailures += 1;\n          if (transportFailures >= 3) throw error;\n          await new Promise(resolve => setTimeout(resolve, 500 * transportFailures));\n        }\n      }\n      if (!response.ok) {\n        diagnostic(response.status === 401 || response.status === 403 ? 'capability_rejected' : 'broker_response_unavailable');\n      } else {\n      if (result.status === 'unavailable') {\n        const reason = typeof result.reason === 'string'\n          ? result.reason.replace(/[\\x00-\\x1f\\x7f]/g, ' ').slice(0, 500)\n          : 'Check the GitHub connection in Paperclip';\n        process.stderr.write('Paperclip: GitHub access unavailable: ' + reason + '. Continuing without GitHub credentials.\\n');\n      }\n      if (result.status === 'available' && configReady) {\n        for (const [key, value] of Object.entries(result.env || {})) {\n          if (/^(GH_TOKEN|GITHUB_TOKEN|PAPERCLIP_GIT_TOKEN|GIT_TERMINAL_PROMPT|GIT_AUTHOR_(NAME|EMAIL)|GIT_COMMITTER_(NAME|EMAIL)|GIT_CONFIG_COUNT|GIT_CONFIG_(KEY|VALUE)_\\d+)$/.test(key) && typeof value === 'string') env[key] = value;\n        }\n      }\n      }\n    } else { diagnostic('capability_missing'); }\n    } catch { diagnostic('broker_transport_unavailable'); }\n  }\n  // Only this invocation and its children inherit the captured credential.\n  // Its Git children use the real binary, so steering cannot split a gh operation.\n  env.PATH = originalPath.join(path.delimiter);\n  if (launcherPlatform === 'win32') env.Path = env.PATH;\n  env.PAPERCLIP_GITHUB_OPERATION_ACTIVE = '1';\n  // Nested shell aliases must not reload the parent launcher profile and\n  // recapture a newer identity. All ordinary descendants stay in this operation.\n  env.ZDOTDIR = configDirectory;\n  env.BASH_ENV = '/dev/null';\n  env.GIT_SSH_COMMAND = 'ssh -F /dev/null -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=none -o BatchMode=yes';\n  const child = startGitHubCommand(executable, process.argv.slice(2), env, launcherPlatform, spawn, path);\n  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => child.kill(signal));\n  child.once('error', () => { process.stderr.write('Paperclip: GitHub command could not start.\\n'); process.exitCode = 1; });\n  child.once('exit', (code, signal) => { process.exitCode = code === null ? 128 : code; });\n}\nmain().catch(() => { process.stderr.write('Paperclip: GitHub launcher_setup_failed.\\n'); process.exitCode = 1; });\n";
+ }
+ /** Override inherited credentials even when adapters merge the host environment later. */
+ export function githubBrokerEnvironment(input, broker) {

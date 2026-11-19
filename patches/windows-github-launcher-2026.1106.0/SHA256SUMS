@@ -1,0 +1,5 @@
+05b8853bdca289d86f3dda1c82a909a5817654885dbf1472de0beee22abefbcf  original dist/github-launcher.js
+cfabc0c2d3bfb4441f9b2fc5995ad4e243618cf5f92f082e9fb042362fcb8e5d  original dist/execution-target.js
+47b1df798c832f5ac1620ed1467b0c12b010bfa5ee872e5a245b7314a17152ed  patched dist/github-launcher.js
+0530ec8cf6c39d68b71d356ee59af2cab5437f20c794fe4bd327e9a46be7691e  patched dist/execution-target.js
+602e223d099ed0290d29589c982bef290ea301872e4d6fe2ffeca6c34737c623  patched dist/windows-github-launcher-shim.js
