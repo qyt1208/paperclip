@@ -101,7 +101,11 @@ export function startGitHubCommand(executable: string, args: readonly string[], 
   const ext = pathApi.extname(executable).toLowerCase();
   if (platform === "win32" && (ext === ".cmd" || ext === ".bat")) {
     const root = env.SystemRoot || env.WINDIR;
-    if (typeof root !== "string" || !/^[A-Za-z]:[\\/][^"\u0000\r\n]*$/.test(root) || root.includes("..") || windowsTextRejected(executable) || args.some(windowsTextRejected)) {
+    // cmd.exe expands % inside the command line even after caret escaping, so a
+    // percent would not round-trip. Reject it instead of running a different command.
+    if (typeof root !== "string" || !/^[A-Za-z]:[\\/][^"\u0000\r\n]*$/.test(root) || root.includes("..")
+      || windowsTextRejected(executable) || args.some(windowsTextRejected)
+      || executable.includes("%") || args.some((arg) => arg.includes("%"))) {
       throw new Error("Paperclip: GitHub command line rejected.");
     }
     const cmd = pathApi.join(root, "System32", "cmd.exe");

@@ -58,22 +58,32 @@ The published `execution-target.js` hash `cfabc0c2...` is rejected. Any other ha
 Required after the copy:
 
 ```text
-48c24b2a3f56dde4d3593e7df079014f5d310a9ed1b096121d9f6c77d89f6abc  11648  dist/github-launcher.js
+efefc81aa4ca26048e7e5866ed35945ca4d6f06c11074526be74a89eec9aee40  11713  dist/github-launcher.js
 260de707d78e5ceea19de2ff3a204585d171a7fa711257b81104261c32c8a86e  200445  dist/execution-target.js
 cb2504483ae9ca4fb9687cb2e056fc18ccbf4fbef35a327f737ae207dc53653d  25043  dist/windows-github-launcher-shim.js
 ```
 
 Stop the server before `--apply`, then start it again with `C:\Users\qx\node.exe` and the same data directory.
 
+A `.cmd` or `.bat` target rejects any argument that contains `%`. Wine showed that `cmd.exe` drops that character (`100%` becomes `100`) even after caret escaping. `.exe` targets, including `E:\Git\cmd\git.exe`, still receive `%` through CreateProcess.
+
 ## Smoke test
 
-After extraction, and again after apply if you want, from this directory:
+From this extracted directory, without changing the npm package:
 
 ```bat
 C:\Users\qx\node.exe smoke\smoke-windows.mjs
 ```
 
-The test uses a temporary directory, `E:\Git\cmd\git.exe`, and a dummy broker on `127.0.0.1`. It does not push, clone, or read credentials. It exits 3 on a non-Windows machine, so a Linux run is not a pass.
+That stages the archive's launcher in a temporary directory, initializes a temporary Git repository, and requires `git check-ignore --non-matching` to print the exact arguments, including spaces, `&`, `工具`, and `100%`. A separate temporary `git.cmd` must record the same arguments except `%`. An argument that contains `%` must be rejected before that `.cmd` runs.
+
+To read the installed package without modifying it:
+
+```bat
+C:\Users\qx\node.exe smoke\smoke-windows.mjs --installed
+```
+
+Before apply, this must resolve the live ESM files, match the baseline hashes above, and report that the shim is absent. It does not stage an executable from that baseline. After apply, the same command loads the adapted modules from the resolved dist paths and runs the behavior checks. It does not push, clone, or read credentials. Exit 3 on a non-Windows machine is not a pass.
 
 ## Roll back
 

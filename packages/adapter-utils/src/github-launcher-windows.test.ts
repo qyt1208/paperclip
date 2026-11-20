@@ -128,6 +128,7 @@ describe("Windows GitHub command resolution", () => {
     expect(calls[1]?.args[3]?.startsWith("\"")).toBe(true);
     expect(calls[1]?.args[3]).toContain("a^&b");
     expect(() => startGitHubCommand(String.raw`C:\git.cmd`, ["a\nb"], { SystemRoot: String.raw`C:\Windows` }, "win32", spawn, path.win32)).toThrow(/command line rejected/);
+    expect(() => startGitHubCommand(String.raw`C:\git.cmd`, ["100%"], { SystemRoot: String.raw`C:\Windows` }, "win32", spawn, path.win32)).toThrow(/command line rejected/);
     expect(() => startGitHubCommand(String.raw`C:\git.cmd`, ["ok"], { SystemRoot: "..\\Windows" }, "win32", spawn, path.win32)).toThrow(/command line rejected/);
   });
 
