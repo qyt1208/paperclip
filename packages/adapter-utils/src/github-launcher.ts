@@ -93,18 +93,15 @@ export function escapeWindowsCmdArgument(arg: string, doubleEscapeMetaChars = fa
   return escaped;
 }
 
-function windowsTextRejected(value: string): boolean {
-  return /[\u0000\r\n]/.test(value);
-}
-
 export function startGitHubCommand(executable: string, args: readonly string[], env: NodeJS.ProcessEnv, platform: string, spawn: typeof Spawn, pathApi: Pick<LauncherPath, "extname" | "join">) {
   const ext = pathApi.extname(executable).toLowerCase();
   if (platform === "win32" && (ext === ".cmd" || ext === ".bat")) {
     const root = env.SystemRoot || env.WINDIR;
+    function control(value: string) { return /[\u0000\r\n]/.test(value); }
     // cmd.exe expands % inside the command line even after caret escaping, so a
     // percent would not round-trip. Reject it instead of running a different command.
     if (typeof root !== "string" || !/^[A-Za-z]:[\\/][^"\u0000\r\n]*$/.test(root) || root.includes("..")
-      || windowsTextRejected(executable) || args.some(windowsTextRejected)
+      || control(executable) || args.some(control)
       || executable.includes("%") || args.some((arg) => arg.includes("%"))) {
       throw new Error("Paperclip: GitHub command line rejected.");
     }
@@ -335,7 +332,13 @@ ${options.brokerFile ? String.raw`
   child.once('error', () => { process.stderr.write('Paperclip: GitHub command could not start.\n'); process.exitCode = 1; });
   child.once('exit', (code, signal) => { process.exitCode = code === null ? 128 : code; });
 }
-main().catch(() => { process.stderr.write('Paperclip: GitHub launcher_setup_failed.\n'); process.exitCode = 1; });
+main().catch((error) => {
+  let detail = "unknown";
+  if (error && typeof error.message === "string") detail = String(error.name || "Error") + ": " + error.message;
+  detail = detail.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 300);
+  process.stderr.write("Paperclip: GitHub launcher_setup_failed: " + detail + "\n");
+  process.exitCode = 1;
+});
 `;
 }
 

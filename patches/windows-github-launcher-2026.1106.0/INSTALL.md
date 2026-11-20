@@ -58,7 +58,7 @@ The published `execution-target.js` hash `cfabc0c2...` is rejected. Any other ha
 Required after the copy:
 
 ```text
-efefc81aa4ca26048e7e5866ed35945ca4d6f06c11074526be74a89eec9aee40  11713  dist/github-launcher.js
+8b74bad7f18ee49cb66f512f32ae3b10c674b7daee3fabb78a4a63c434d26215  12030  dist/github-launcher.js
 260de707d78e5ceea19de2ff3a204585d171a7fa711257b81104261c32c8a86e  200445  dist/execution-target.js
 cb2504483ae9ca4fb9687cb2e056fc18ccbf4fbef35a327f737ae207dc53653d  25043  dist/windows-github-launcher-shim.js
 ```
@@ -75,7 +75,7 @@ From this extracted directory, without changing the npm package:
 C:\Users\qx\node.exe smoke\smoke-windows.mjs
 ```
 
-That stages the archive's launcher in a temporary directory, initializes a temporary Git repository, and requires `git check-ignore --non-matching` to print the exact arguments, including spaces, `&`, `工具`, and `100%`. A separate temporary `git.cmd` must record the same arguments except `%`. An argument that contains `%` must be rejected before that `.cmd` runs.
+That stages the archive's launcher in a temporary directory, initializes a temporary Git repository, and sends the arguments to `git check-ignore -z -v --non-matching --stdin`. The stdout bytes must be the raw NUL records Git documents for non-matching paths: three NUL bytes, the pathname unchanged, and a NUL. Exit 128 is a failure. A separate temporary `git.cmd` must record the same arguments except `%`. An argument that contains `%` must be rejected with `launcher_setup_failed: Error: Paperclip: GitHub command line rejected.` before that `.cmd` runs.
 
 To read the installed package without modifying it:
 

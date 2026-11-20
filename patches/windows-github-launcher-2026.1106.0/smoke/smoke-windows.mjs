@@ -30,7 +30,7 @@ const baseline = {
   "execution-target.js": ["b31d890dbc0217da23f1d84b23f09143a90cc6c520caac70559134a6c9ac1557", 199348],
 };
 const adapted = {
-  "github-launcher.js": ["efefc81aa4ca26048e7e5866ed35945ca4d6f06c11074526be74a89eec9aee40", 11713],
+  "github-launcher.js": ["8b74bad7f18ee49cb66f512f32ae3b10c674b7daee3fabb78a4a63c434d26215", 12030],
   "execution-target.js": ["260de707d78e5ceea19de2ff3a204585d171a7fa711257b81104261c32c8a86e", 200445],
   "windows-github-launcher-shim.js": ["cb2504483ae9ca4fb9687cb2e056fc18ccbf4fbef35a327f737ae207dc53653d", 25043],
 };
@@ -71,21 +71,23 @@ if (!installedMode) {
   }
 }
 
-function run(file, args, env, cwd) {
+function run(file, args, env, cwd, stdin) {
   return new Promise((resolve) => {
     const child = spawn(file, args, {
-      cwd, env, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+      cwd, env, shell: false, windowsHide: true,
+      stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
-    let stdout = "";
+    const stdout = [];
     let stderr = "";
     const timer = setTimeout(() => {
       child.kill();
-      resolve({ code: 124, stdout, stderr: stderr + "\ntimeout" });
+      resolve({ code: 124, stdout: Buffer.concat(stdout), stderr: stderr + "\ntimeout" });
     }, 20000);
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stdout.on("data", (chunk) => { stdout.push(chunk); });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", (error) => { clearTimeout(timer); resolve({ code: 127, stdout, stderr: stderr + error.message }); });
-    child.on("exit", (code) => { clearTimeout(timer); resolve({ code: code ?? 1, stdout, stderr }); });
+    child.on("error", (error) => { clearTimeout(timer); resolve({ code: 127, stdout: Buffer.concat(stdout), stderr: stderr + error.message }); });
+    child.on("exit", (code) => { clearTimeout(timer); resolve({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr }); });
+    if (stdin !== undefined && child.stdin) child.stdin.end(stdin);
   });
 }
 
@@ -100,11 +102,31 @@ function check(name, ok, detail) {
 
 async function identifyInstalled() {
   if (!existsSync(serverLauncherFile)) throw new Error("server launcher file is missing: " + serverLauncherFile);
-  const parent = pathToFileURL(serverLauncherFile).href;
-  const launcherUrl = import.meta.resolve("@paperclipai/adapter-utils/github-launcher", parent);
-  const targetUrl = import.meta.resolve("@paperclipai/adapter-utils/execution-target", parent);
-  const launcherFile = fileURLToPath(launcherUrl);
-  const targetFile = fileURLToPath(targetUrl);
+  const serverSource = readFileSync(serverLauncherFile, "utf8");
+  if (!serverSource.includes('from "@paperclipai/adapter-utils/github-launcher"')
+    || !serverSource.includes('from "@paperclipai/adapter-utils/execution-target"')) {
+    throw new Error("server file does not import the adapter-utils launcher subpaths");
+  }
+  let dir = path.dirname(serverLauncherFile);
+  let found = "";
+  for (let hop = 0; hop < 8; hop += 1) {
+    const candidate = path.join(dir, "node_modules", "@paperclipai", "adapter-utils");
+    if (existsSync(path.join(candidate, "package.json"))) { found = candidate; break; }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  if (path.win32.normalize(found).toLowerCase() !== path.win32.normalize(adapterRoot).toLowerCase()) {
+    throw new Error("Node module walk did not land on the known adapter-utils directory: " + found);
+  }
+  const packageInfo = JSON.parse(readFileSync(path.join(found, "package.json"), "utf8"));
+  const star = packageInfo.exports && packageInfo.exports["./*"];
+  if (packageInfo.name !== "@paperclipai/adapter-utils" || packageInfo.version !== "2026.1106.0"
+    || !star || star.import !== "./dist/*.js" || star.require) {
+    throw new Error("adapter-utils package exports are not the inspected import-only map");
+  }
+  const launcherFile = path.join(found, "dist", "github-launcher.js");
+  const targetFile = path.join(found, "dist", "execution-target.js");
   const expectedDir = path.resolve(adapterRoot, "dist");
   if (path.win32.normalize(path.dirname(launcherFile)).toLowerCase() !== expectedDir.toLowerCase()
     || path.win32.normalize(path.dirname(targetFile)).toLowerCase() !== expectedDir.toLowerCase()) {
@@ -201,21 +223,21 @@ try {
     PAPERCLIP_GITHUB_BROKER_TOKEN: "smoke-local-token",
   };
   const version = await run(path.join(launcherDir, "git.exe"), ["--version"], env, repo);
-  check("git --version", version.code === 0 && /git version /i.test(version.stdout), version.stderr.slice(0, 500));
+  check("git --version", version.code === 0 && /git version /i.test(version.stdout.toString("utf8")), version.stderr.slice(0, 500));
   check("broker called once", captures.length === 1 && captures[0].capability === "smoke-local-token" && captures[0].body === "{}", JSON.stringify(captures));
-  check("token stays out of git output", !version.stdout.includes("smoke-local-token") && !version.stderr.includes("smoke-local-token"), "");
+  check("token stays out of git output", !version.stdout.toString("utf8").includes("smoke-local-token") && !version.stderr.includes("smoke-local-token"), "");
   const execPath = await run(path.join(launcherDir, "git.exe"), ["--exec-path"], env, repo);
-  check("real git under E:\\Git", execPath.code === 0 && execPath.stdout.replaceAll("/", "\\").toLowerCase().includes("e:\\git\\"), execPath.stdout);
+  check("real git under E:\\Git", execPath.code === 0 && execPath.stdout.toString("utf8").replaceAll("/", "\\").toLowerCase().includes("e:\\git\\"), execPath.stdout.toString("utf8"));
 
   const direct = await run(gitExe, ["init", "-q"], {
     PATH: path.win32.dirname(gitExe), PATHEXT: ".EXE",
     SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR,
   }, repo);
   check("isolated repo init", direct.code === 0 && existsSync(path.join(repo, ".git")), direct.stderr.slice(0, 400));
-  const echoed = await run(path.join(launcherDir, "git.exe"), ["-c", "core.quotepath=false", "check-ignore", "-v", "--non-matching", "--", ...roundtripArgs], env, repo);
-  const lines = echoed.stdout.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n").filter(Boolean);
-  const expected = roundtripArgs.map((arg) => "::\t" + arg);
-  check("argument roundtrip", echoed.code === 1 && JSON.stringify(lines) === JSON.stringify(expected), "code " + echoed.code + "\n" + echoed.stdout + "\n" + echoed.stderr.slice(0, 500));
+  const payload = Buffer.concat(roundtripArgs.map((arg) => Buffer.concat([Buffer.from(arg, "utf8"), Buffer.from([0])])));
+  const echoed = await run(path.join(launcherDir, "git.exe"), ["-c", "core.quotepath=false", "check-ignore", "-z", "-v", "--non-matching", "--stdin"], env, repo, payload);
+  const expectedBytes = Buffer.concat(roundtripArgs.map((arg) => Buffer.concat([Buffer.from([0, 0, 0]), Buffer.from(arg, "utf8"), Buffer.from([0])])));
+  check("argument roundtrip", echoed.code === 1 && Buffer.isBuffer(echoed.stdout) && echoed.stdout.equals(expectedBytes) && !echoed.stderr.includes("not a git repository") && !echoed.stderr.includes("launcher_setup_failed"), "code " + echoed.code + "\n" + echoed.stderr.slice(0, 500));
 
   writeFileSync(path.join(cmdDir, "record-args.cjs"), "const fs=require('node:fs'); const path=require('node:path'); fs.writeFileSync(path.join(__dirname, 'argv.json'), JSON.stringify(process.argv.slice(2)));\n");
   writeFileSync(path.join(cmdDir, "git.cmd"), "@echo off\r\n\"" + serverNode + "\" \"%~dp0record-args.cjs\" %*\r\n");
@@ -227,7 +249,7 @@ try {
   check("cmd argument roundtrip", cmdResult.code === 0 && JSON.stringify(recorded) === JSON.stringify(cmdRoundtripArgs), JSON.stringify(recorded) + "\n" + cmdResult.stderr.slice(0, 500));
   rmSync(argvFile, { force: true });
   const rejected = await run(path.join(launcherDir, "git.exe"), ["100%"], cmdEnv, repo);
-  check("cmd percent rejected", rejected.code === 1 && rejected.stderr.includes("launcher_setup_failed") && !existsSync(argvFile), rejected.stderr.slice(0, 400));
+  check("cmd percent rejected", rejected.code === 1 && rejected.stderr.includes("launcher_setup_failed: Error: Paperclip: GitHub command line rejected.") && !existsSync(argvFile), rejected.stderr.slice(0, 400));
   }
 } catch (error) {
   failures.push(error instanceof Error ? error.message : String(error));

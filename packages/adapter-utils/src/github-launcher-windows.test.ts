@@ -129,6 +129,13 @@ describe("Windows GitHub command resolution", () => {
     expect(calls[1]?.args[3]).toContain("a^&b");
     expect(() => startGitHubCommand(String.raw`C:\git.cmd`, ["a\nb"], { SystemRoot: String.raw`C:\Windows` }, "win32", spawn, path.win32)).toThrow(/command line rejected/);
     expect(() => startGitHubCommand(String.raw`C:\git.cmd`, ["100%"], { SystemRoot: String.raw`C:\Windows` }, "win32", spawn, path.win32)).toThrow(/command line rejected/);
+    const staged = githubLauncherSource({ platform: "win32" });
+    const helpers = staged.slice(staged.indexOf("function githubLauncherDirectoriesMatch"), staged.indexOf("if (process.env.PAPERCLIP_GITHUB_OPERATION_ACTIVE)"));
+    const embedded = new Function(`${helpers}; return startGitHubCommand;`)() as typeof startGitHubCommand;
+    embedded(String.raw`C:\temp\git.cmd`, ["a b", "a&b", "工具"], { SystemRoot: String.raw`C:\Windows` }, "win32", spawn, path.win32);
+    expect(calls.at(-1)?.command).toBe(String.raw`C:\Windows\System32\cmd.exe`);
+    expect(() => embedded(String.raw`C:\temp\git.cmd`, ["100%"], { SystemRoot: String.raw`C:\Windows` }, "win32", spawn, path.win32)).toThrow(Error);
+    expect(() => embedded(String.raw`C:\temp\git.cmd`, ["100%"], { SystemRoot: String.raw`C:\Windows` }, "win32", spawn, path.win32)).toThrow(/command line rejected/);
     expect(() => startGitHubCommand(String.raw`C:\git.cmd`, ["ok"], { SystemRoot: "..\\Windows" }, "win32", spawn, path.win32)).toThrow(/command line rejected/);
   });
 

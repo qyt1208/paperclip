@@ -15,7 +15,7 @@ const before = {
   "dist/execution-target.js": ["b31d890dbc0217da23f1d84b23f09143a90cc6c520caac70559134a6c9ac1557", 199348],
 };
 const after = {
-  "dist/github-launcher.js": ["efefc81aa4ca26048e7e5866ed35945ca4d6f06c11074526be74a89eec9aee40", 11713],
+  "dist/github-launcher.js": ["8b74bad7f18ee49cb66f512f32ae3b10c674b7daee3fabb78a4a63c434d26215", 12030],
   "dist/execution-target.js": ["260de707d78e5ceea19de2ff3a204585d171a7fa711257b81104261c32c8a86e", 200445],
   "dist/windows-github-launcher-shim.js": ["cb2504483ae9ca4fb9687cb2e056fc18ccbf4fbef35a327f737ae207dc53653d", 25043],
 };
